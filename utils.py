@@ -41,6 +41,10 @@ class SplitData(BaseEstimator, TransformerMixin):
             y_ = X[labels]
             X_ = X.drop('label', axis=1)
 
+        elif self.dataset == 'cic':
+            y_ = X[labels].values.astype('float32')
+            X_ = X.drop(labels, axis=1)
+
         else:
             raise ValueError("Unsupported dataset type")
 
@@ -156,38 +160,44 @@ def log_likelihood(params, data):
     pdf2 = gaussian_pdf(data, mu2, sigma2)
     return -np.sum(np.log(0.5 * pdf1 + 0.5 * pdf2))
 
-def evaluate(normal_temp, normal_recon_temp, x_train, y_train, x_test, y_test, model, get_confidence=False, en_or_de=False):
-    num_of_layer = 0
+@torch.no_grad()
+def evaluate(normal_temp, normal_recon_temp, x_train, y_train, x_test, y_test, model, get_confidence=False, en_or_de=False, return_predictions=False):
+    normal_mask = (y_train == 0).squeeze()
+    abnormal_mask = (y_train == 1).squeeze()
 
-    x_train_normal = x_train[(y_train == 0).squeeze()]
-    x_train_abnormal = x_train[(y_train == 1).squeeze()]
+    # One forward pass for all training data (was 8 passes, now 2)
+    train_enc, train_dec = model(x_train)
+    train_features = F.normalize(train_enc, p=2, dim=1)
+    train_recon = F.normalize(train_dec, p=2, dim=1)
 
-    train_features = F.normalize(model(x_train)[num_of_layer], p=2, dim=1)
-    train_features_normal = F.normalize(model(x_train_normal)[num_of_layer], p=2, dim=1)
-    train_features_abnormal = F.normalize(model(x_train_abnormal)[num_of_layer], p=2, dim=1)
-    test_features = F.normalize(model(x_test)[num_of_layer], p=2, dim=1)
+    train_features_normal = train_features[normal_mask]
+    train_features_abnormal = train_features[abnormal_mask]
+    train_recon_normal = train_recon[normal_mask]
+    train_recon_abnormal = train_recon[abnormal_mask]
 
-    values_features_all, indcies = torch.sort(F.cosine_similarity(train_features, normal_temp.reshape([-1, normal_temp.shape[0]]), dim=1))
-    values_features_normal, indcies = torch.sort(F.cosine_similarity(train_features_normal, normal_temp.reshape([-1, normal_temp.shape[0]]), dim=1))
-    values_features_abnormal, indcies = torch.sort(F.cosine_similarity(train_features_abnormal, normal_temp.reshape([-1, normal_temp.shape[0]]), dim=1))
+    # One forward pass for test data
+    test_enc, test_dec = model(x_test)
+    test_features = F.normalize(test_enc, p=2, dim=1)
+    test_recon = F.normalize(test_dec, p=2, dim=1)
+
+    normal_temp_r = normal_temp.reshape(1, -1)
+    normal_recon_temp_r = normal_recon_temp.reshape(1, -1)
+
+    values_features_all, _ = torch.sort(F.cosine_similarity(train_features, normal_temp_r, dim=1))
+    values_features_normal, _ = torch.sort(F.cosine_similarity(train_features_normal, normal_temp_r, dim=1))
+    values_features_abnormal, _ = torch.sort(F.cosine_similarity(train_features_abnormal, normal_temp_r, dim=1))
 
     values_features_all = values_features_all.cpu().detach().numpy()
 
-    values_features_test = F.cosine_similarity(test_features, normal_temp.reshape([-1, normal_temp.shape[0]]))
+    values_features_test = F.cosine_similarity(test_features, normal_temp_r)
 
-    num_of_output = 1
-    train_recon = F.normalize(model(x_train)[num_of_output], p=2, dim=1)
-    train_recon_normal = F.normalize(model(x_train_normal)[num_of_output], p=2, dim=1)
-    train_recon_abnormal = F.normalize(model(x_train_abnormal)[num_of_output], p=2, dim=1)
-    test_recon = F.normalize(model(x_test)[num_of_output], p=2, dim=1)
-
-    values_recon_all, indcies = torch.sort(F.cosine_similarity(train_recon, normal_recon_temp.reshape([-1, normal_recon_temp.shape[0]]), dim=1))
-    values_recon_normal, indcies = torch.sort(F.cosine_similarity(train_recon_normal, normal_recon_temp.reshape([-1, normal_recon_temp.shape[0]]), dim=1))
-    values_recon_abnormal, indcies = torch.sort(F.cosine_similarity(train_recon_abnormal, normal_recon_temp.reshape([-1, normal_recon_temp.shape[0]]), dim=1))
+    values_recon_all, _ = torch.sort(F.cosine_similarity(train_recon, normal_recon_temp_r, dim=1))
+    values_recon_normal, _ = torch.sort(F.cosine_similarity(train_recon_normal, normal_recon_temp_r, dim=1))
+    values_recon_abnormal, _ = torch.sort(F.cosine_similarity(train_recon_abnormal, normal_recon_temp_r, dim=1))
 
     values_recon_all = values_recon_all.cpu().detach().numpy()
 
-    values_recon_test = F.cosine_similarity(test_recon, normal_recon_temp.reshape([-1, normal_recon_temp.shape[0]]), dim=1)
+    values_recon_test = F.cosine_similarity(test_recon, normal_recon_temp_r, dim=1)
 
     mu1_initial = np.mean(values_features_normal.cpu().detach().numpy())
     sigma1_initial = np.std(values_features_normal.cpu().detach().numpy())
@@ -251,6 +261,8 @@ def evaluate(normal_temp, normal_recon_temp, x_train, y_train, x_test, y_test, m
     
     if not isinstance(y_test, int):
         result_final = score_detail(y_test, y_test_pred_no_vote, if_print=True)
+        if return_predictions:
+            return result_encoder, result_decoder, result_final, y_test_pred_no_vote.numpy()
         return result_encoder, result_decoder, result_final
     else:
         return y_test_pred_no_vote
