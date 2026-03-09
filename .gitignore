@@ -11,13 +11,16 @@ env/
 
 # Data files
 CIC-IDS-2017/
-CIC_pre_data/
-NSL_pre_data/
-UNSW_pre_data/
 *.csv
+
+result/
 
 # PDF
 *.pdf
+
+# Training results
+result/
+results/
 
 # IDE
 .vscode/

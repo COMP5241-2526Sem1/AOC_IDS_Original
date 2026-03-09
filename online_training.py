@@ -1,10 +1,12 @@
+import os
+import json
 import torch
 import numpy as np
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset
 from sklearn.model_selection import train_test_split
+from datetime import datetime
 from utils import *
 from visualization import plot_training_summary
 
@@ -95,8 +97,11 @@ device = torch.device("cuda:"+cuda_num if torch.cuda.is_available() else "cpu")
 criterion = CRCLoss(device, tem)
 
 for i in range(seed_round):
-    # Set the seed for the random number generator for this iteration
     setup_seed(seed+i)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_dir = os.path.join('result', f'{dataset}_seed{seed+i}_{timestamp}')
+    os.makedirs(run_dir, exist_ok=True)
 
     first_round_losses = []
     online_losses = []
@@ -243,7 +248,51 @@ for i in range(seed_round):
     print(f'  {"Combined":12s} {res_final[0]:>8.4f} {res_final[1]:>8.4f} {res_final[2]:>8.4f} {res_final[3]:>8.4f}')
     print(f'{"=" * 60}')
 
+    # ==================== Save results to result/ ====================
+    metric_names = ['accuracy', 'precision', 'recall', 'f1']
+    run_result = {
+        'config': {
+            'dataset': dataset,
+            'seed': seed + i,
+            'epochs': epochs,
+            'epoch_1': epoch_1,
+            'percent': percent,
+            'flip_percent': flip_percent,
+            'sample_interval': sample_interval,
+            'batch_size': bs,
+            'temperature': tem,
+            'input_dim': input_dim,
+            'num_first_train': num_of_first_train,
+            'timestamp': timestamp,
+        },
+        'stage1_losses': first_round_losses,
+        'stage2_losses': online_losses,
+        'online_metrics': {
+            str(step): dict(zip(metric_names, [float(v) for v in vals]))
+            for step, vals in online_metrics.items()
+        },
+        'final_results': {
+            'encoder':  dict(zip(metric_names, [float(v) for v in res_en])),
+            'decoder':  dict(zip(metric_names, [float(v) for v in res_de])),
+            'combined': dict(zip(metric_names, [float(v) for v in res_final])),
+        },
+    }
+
+    with open(os.path.join(run_dir, 'metrics.json'), 'w') as f:
+        json.dump(run_result, f, indent=2)
+
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, os.path.join(run_dir, 'model.pth'))
+
     y_test_np = y_test.cpu().numpy() if isinstance(y_test, torch.Tensor) else np.array(y_test)
+    np.savez(
+        os.path.join(run_dir, 'predictions.npz'),
+        y_true=y_test_np,
+        y_pred=y_pred_final,
+    )
+
     plot_training_summary(
         first_round_losses=first_round_losses,
         online_losses=online_losses,
@@ -255,4 +304,7 @@ for i in range(seed_round):
         y_test_pred=y_pred_final,
         dataset=dataset,
         seed=seed+i,
+        save_dir=run_dir,
     )
+
+    print(f'  [Saved] All results -> {run_dir}/')
