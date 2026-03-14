@@ -16,8 +16,7 @@ import warnings
 # 记录程序启动时间
 START_TIME = time.time()
 # 设定安全退出时间：11.5 小时 (11.5 * 3600 秒)
-# MAX_RUN_SECONDS = 11.5 * 3600
-MAX_RUN_SECONDS = 1200
+MAX_RUN_SECONDS = 11.5 * 3600
 
 warnings.filterwarnings('ignore')
 
@@ -158,8 +157,27 @@ for i in range(seed_round):
         model.train()
         for epoch in range(epochs):
             epoch_loss = 0.0
-            # ... (保留你原来的 Stage 1 代码，直到下面这几行初始化) ...
-            
+            num_batches = 0
+            for j, data in enumerate(train_loader, 0):
+                inputs, labels = data
+                inputs = inputs.to(device)
+
+                labels = labels.to(device)
+                optimizer.zero_grad()
+
+                features, recon_vec = model(inputs)
+                loss = criterion(features,labels) + criterion(recon_vec,labels)
+
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                num_batches += 1
+
+            avg_loss = epoch_loss / max(num_batches, 1)
+            first_round_losses.append(avg_loss)
+            print(f'[Stage1] seed={seed+i}, epoch={epoch+1}/{epochs}, loss={avg_loss:.6f}')
+
         x_train = x_train.to(device)
         x_test = x_test.to(device)
         online_x_train, online_y_train  = online_x_train.to(device), online_y_train.to(device)
@@ -168,37 +186,6 @@ for i in range(seed_round):
         
         y_train_detection = y_train_this_epoch
         y_test_left_labels = y_test_left_epoch.clone()
-
-####################### Stage 1: Offline Training #######################
-    model.train()
-    for epoch in range(epochs):
-        epoch_loss = 0.0
-        num_batches = 0
-        for j, data in enumerate(train_loader, 0):
-            inputs, labels = data
-            inputs = inputs.to(device)
-
-            labels = labels.to(device)
-            optimizer.zero_grad()
-
-            features, recon_vec = model(inputs)
-            loss = criterion(features,labels) + criterion(recon_vec,labels)
-
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
-            num_batches += 1
-
-        avg_loss = epoch_loss / max(num_batches, 1)
-        first_round_losses.append(avg_loss)
-        print(f'[Stage1] seed={seed+i}, epoch={epoch+1}/{epochs}, loss={avg_loss:.6f}')
-
-    x_train = x_train.to(device)
-    x_test = x_test.to(device)
-    online_x_train, online_y_train  = online_x_train.to(device), online_y_train.to(device)
-
-    x_train_this_epoch, x_test_left_epoch, y_train_this_epoch, y_test_left_epoch = online_x_train.clone(), online_x_test.clone().to(device), online_y_train.clone(), online_y_test.clone()
 
 ####################### Stage 2: Online Training #######################
     count = start_count # 从存档点或 0 开始
