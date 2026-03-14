@@ -23,6 +23,8 @@ parser.add_argument("--percent", type=float, default=0.8)
 parser.add_argument("--flip_percent", type=float, default=0.2)
 parser.add_argument("--sample_interval", type=int, default=2000)
 parser.add_argument("--cuda", type=str, default="0")
+parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint file to resume from")
+parser.add_argument("--save_interval", type=int, default=50, help="Save checkpoint every X steps")
 
 args = parser.parse_args()
 dataset = args.dataset
@@ -116,6 +118,50 @@ for i in range(seed_round):
 
     model = AE(input_dim).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr= 0.001)
+    
+# ==================== 断点续跑：加载逻辑 ====================
+    start_count = 0
+    skip_stage1 = False
+    if args.resume and os.path.exists(args.resume):
+        print(f"[*] 发现存档，正在从 {args.resume} 恢复训练...")
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        start_count = checkpoint.get('count', 0)
+        first_round_losses = checkpoint.get('first_round_losses', [])
+        online_losses = checkpoint.get('online_losses', [])
+        online_metrics = checkpoint.get('online_metrics', {})
+        
+        # 恢复 Stage 2 循环所需的核心数据集变量
+        x_train_this_epoch = checkpoint['x_train_this_epoch'].to(device)
+        x_test_left_epoch = checkpoint['x_test_left_epoch'].to(device)
+        y_train_this_epoch = checkpoint['y_train_this_epoch'].to(device)
+        y_test_left_labels = checkpoint['y_test_left_labels'].to(device)
+        y_train_detection = checkpoint['y_train_detection'].to(device)
+        
+        skip_stage1 = True
+        print(f"[*] 成功恢复！将从 Stage 2 的第 {start_count} 步继续...")
+    else:
+        first_round_losses = []
+        online_losses = []
+        online_metrics = {}
+
+####################### Stage 1: Offline Training #######################
+    if not skip_stage1: # 如果没有存档，才跑第一阶段
+        model.train()
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            # ... (保留你原来的 Stage 1 代码，直到下面这几行初始化) ...
+            
+        x_train = x_train.to(device)
+        x_test = x_test.to(device)
+        online_x_train, online_y_train  = online_x_train.to(device), online_y_train.to(device)
+
+        x_train_this_epoch, x_test_left_epoch, y_train_this_epoch, y_test_left_epoch = online_x_train.clone(), online_x_test.clone().to(device), online_y_train.clone(), online_y_test.clone()
+        
+        y_train_detection = y_train_this_epoch
+        y_test_left_labels = y_test_left_epoch.clone()
 
 ####################### Stage 1: Offline Training #######################
     model.train()
@@ -149,83 +195,125 @@ for i in range(seed_round):
     x_train_this_epoch, x_test_left_epoch, y_train_this_epoch, y_test_left_epoch = online_x_train.clone(), online_x_test.clone().to(device), online_y_train.clone(), online_y_test.clone()
 
 ####################### Stage 2: Online Training #######################
-    count = 0
-    total_online_samples = len(x_test_left_epoch)
+    count = start_count # 从存档点或 0 开始
+    
+    # 计算正确的总进度条
+    if not skip_stage1:
+        total_online_samples = len(x_test_left_epoch)
+    else:
+        total_online_samples = count * sample_interval + len(x_test_left_epoch)
     total_online_steps = (total_online_samples + sample_interval - 1) // sample_interval
-    y_train_detection = y_train_this_epoch
-    y_test_left_labels = y_test_left_epoch.clone()
 
-    while len(x_test_left_epoch) > 0:
-        count += 1
-        processed = min(count * sample_interval, total_online_samples)
-        
-        if len(x_test_left_epoch) < sample_interval:
-            x_test_this_epoch = x_test_left_epoch.clone()
-            y_true_this_step = y_test_left_labels.clone()
-            x_test_left_epoch.resize_(0)
-            y_test_left_labels.resize_(0)
-        else:
-            x_test_this_epoch = x_test_left_epoch[:sample_interval].clone()
-            y_true_this_step = y_test_left_labels[:sample_interval].clone()
-            x_test_left_epoch = x_test_left_epoch[sample_interval:]
-            y_test_left_labels = y_test_left_labels[sample_interval:]
+    try:
+        while len(x_test_left_epoch) > 0:
+            count += 1
+            processed = min(count * sample_interval, total_online_samples)
 
-        with torch.no_grad():
-            normal_data = online_x_train[(online_y_train == 0).squeeze()]
-            enc, dec = model(normal_data)
-            normal_temp = torch.mean(F.normalize(enc, p=2, dim=1), dim=0)
-            normal_recon_temp = torch.mean(F.normalize(dec, p=2, dim=1), dim=0)
-        predict_label = evaluate(normal_temp, normal_recon_temp, x_train_this_epoch, y_train_detection, x_test_this_epoch, 0, model)
+            if len(x_test_left_epoch) < sample_interval:
+                x_test_this_epoch = x_test_left_epoch.clone()
+                y_true_this_step = y_test_left_labels.clone()
+                x_test_left_epoch.resize_(0)
+                y_test_left_labels.resize_(0)
+            else:
+                x_test_this_epoch = x_test_left_epoch[:sample_interval].clone()
+                y_true_this_step = y_test_left_labels[:sample_interval].clone()
+                x_test_left_epoch = x_test_left_epoch[sample_interval:]
+                y_test_left_labels = y_test_left_labels[sample_interval:]
 
-        y_true_np = y_true_this_step.cpu().numpy()
-        y_pred_np = predict_label.cpu().numpy() if isinstance(predict_label, torch.Tensor) else np.array(predict_label)
-        batch_acc  = accuracy_score(y_true_np, y_pred_np)
-        batch_prec = precision_score(y_true_np, y_pred_np, zero_division=0)
-        batch_rec  = recall_score(y_true_np, y_pred_np, zero_division=0)
-        batch_f1   = f1_score(y_true_np, y_pred_np, zero_division=0)
-        online_metrics[count] = (batch_acc, batch_prec, batch_rec, batch_f1)
+            with torch.no_grad():
+                normal_data = online_x_train[(online_y_train == 0).squeeze()]
+                enc, dec = model(normal_data)
+                normal_temp = torch.mean(F.normalize(enc, p=2, dim=1), dim=0)
+                normal_recon_temp = torch.mean(F.normalize(dec, p=2, dim=1), dim=0)
+            predict_label = evaluate(normal_temp, normal_recon_temp, x_train_this_epoch, y_train_detection, x_test_this_epoch, 0, model)
 
-        print(f'[Stage2] seed={seed+i}, step={count}/{total_online_steps} '
-              f'({100*processed/total_online_samples:.1f}%) | '
-              f'Acc={batch_acc:.4f}  Prec={batch_prec:.4f}  '
-              f'Rec={batch_rec:.4f}  F1={batch_f1:.4f}')
+            y_true_np = y_true_this_step.cpu().numpy()
+            y_pred_np = predict_label.cpu().numpy() if isinstance(predict_label, torch.Tensor) else np.array(predict_label)
+            batch_acc  = accuracy_score(y_true_np, y_pred_np)
+            batch_prec = precision_score(y_true_np, y_pred_np, zero_division=0)
+            batch_rec  = recall_score(y_true_np, y_pred_np, zero_division=0)
+            batch_f1   = f1_score(y_true_np, y_pred_np, zero_division=0)
+            online_metrics[count] = (batch_acc, batch_prec, batch_rec, batch_f1)
 
-        y_test_pred_this_epoch = predict_label
-        y_train_detection = torch.cat((y_train_detection.to(device), torch.tensor(y_test_pred_this_epoch).to(device)))
-        num_zero = int(flip_percent * y_test_pred_this_epoch.shape[0])
-        zero_indices = np.random.choice(y_test_pred_this_epoch.shape[0], num_zero, replace=False)
-        y_test_pred_this_epoch[zero_indices] = 1 - y_test_pred_this_epoch[zero_indices]
+            print(f'[Stage2] seed={seed+i}, step={count}/{total_online_steps} '
+                f'({100*processed/total_online_samples:.1f}%) | '
+                f'Acc={batch_acc:.4f}  Prec={batch_prec:.4f}  '
+                f'Rec={batch_rec:.4f}  F1={batch_f1:.4f}')
 
-        x_train_this_epoch = torch.cat((x_train_this_epoch.to(device), x_test_this_epoch.to(device)))
-        y_train_this_epoch_temp = y_train_this_epoch.clone()
-        y_train_this_epoch = torch.cat((y_train_this_epoch_temp.to(device), torch.tensor(y_test_pred_this_epoch).to(device)))
+            y_test_pred_this_epoch = predict_label
+            y_train_detection = torch.cat((y_train_detection.to(device), torch.tensor(y_test_pred_this_epoch).to(device)))
+            num_zero = int(flip_percent * y_test_pred_this_epoch.shape[0])
+            zero_indices = np.random.choice(y_test_pred_this_epoch.shape[0], num_zero, replace=False)
+            y_test_pred_this_epoch[zero_indices] = 1 - y_test_pred_this_epoch[zero_indices]
 
-        train_ds = TensorDataset(x_train_this_epoch, y_train_this_epoch)
-        
-        train_loader = torch.utils.data.DataLoader(
-            dataset=train_ds, batch_size=bs, shuffle=True)
-        model.train()
-        step_loss = 0.0
-        step_batches = 0
-        for epoch in range(epoch_1):
-            for j, data in enumerate(train_loader, 0):
-                inputs, labels = data
-                inputs = inputs.to(device)
+            x_train_this_epoch = torch.cat((x_train_this_epoch.to(device), x_test_this_epoch.to(device)))
+            y_train_this_epoch_temp = y_train_this_epoch.clone()
+            y_train_this_epoch = torch.cat((y_train_this_epoch_temp.to(device), torch.tensor(y_test_pred_this_epoch).to(device)))
 
-                labels = labels.to(device)
-                optimizer.zero_grad()
+            train_ds = TensorDataset(x_train_this_epoch, y_train_this_epoch)
+            
+            train_loader = torch.utils.data.DataLoader(
+                dataset=train_ds, batch_size=bs, shuffle=True)
+            model.train()
+            step_loss = 0.0
+            step_batches = 0
+            for epoch in range(epoch_1):
+                for j, data in enumerate(train_loader, 0):
+                    inputs, labels = data
+                    inputs = inputs.to(device)
 
-                features, recon_vec = model(inputs)
+                    labels = labels.to(device)
+                    optimizer.zero_grad()
 
-                loss = criterion(features,labels) + criterion(recon_vec,labels)
+                    features, recon_vec = model(inputs)
 
-                loss.backward()
-                optimizer.step()
+                    loss = criterion(features,labels) + criterion(recon_vec,labels)
 
-                step_loss += loss.item()
-                step_batches += 1
+                    loss.backward()
+                    optimizer.step()
 
-        online_losses.append(step_loss / max(step_batches, 1))
+                    step_loss += loss.item()
+                    step_batches += 1
+
+            online_losses.append(step_loss / max(step_batches, 1))
+            # ==================== 周期性自动保存 ====================
+            if count % args.save_interval == 0:
+                ckpt_path = os.path.join(run_dir, f'ckpt_step_{count}.pth')
+                torch.save({
+                    'count': count,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'x_train_this_epoch': x_train_this_epoch,
+                    'x_test_left_epoch': x_test_left_epoch,
+                    'y_train_this_epoch': y_train_this_epoch,
+                    'y_test_left_labels': y_test_left_labels,
+                    'y_train_detection': y_train_detection,
+                    'first_round_losses': first_round_losses,
+                    'online_losses': online_losses,
+                    'online_metrics': online_metrics
+                }, ckpt_path)
+                print(f"[*] 已自动存档至: {ckpt_path}")
+
+    except KeyboardInterrupt:
+        # ==================== 捕获中断：紧急死亡保存 ====================
+        print(f"\n[!] 检测到手动中断！正在紧急保存当前进度 (Step {count})...")
+        ckpt_path = os.path.join('result', f'ckpt_emergency_step_{count}.pth')
+        torch.save({
+            'count': count,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'x_train_this_epoch': x_train_this_epoch,
+            'x_test_left_epoch': x_test_left_epoch,
+            'y_train_this_epoch': y_train_this_epoch,
+            'y_test_left_labels': y_test_left_labels,
+            'y_train_detection': y_train_detection,
+            'first_round_losses': first_round_losses,
+            'online_losses': online_losses,
+            'online_metrics': online_metrics
+        }, ckpt_path)
+        print(f"[*] 紧急存档已保存至: {ckpt_path}")
+        print("程序安全退出，下次可以使用 --resume 参数接着跑。")
+        exit(0) # 退出程序，避免中断后继续执行最终评估代码报错
 
 ################### Final Evaluation ###################
     with torch.no_grad():
