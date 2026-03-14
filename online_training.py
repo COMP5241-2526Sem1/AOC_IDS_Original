@@ -9,9 +9,14 @@ from sklearn.model_selection import train_test_split
 from datetime import datetime
 from utils import *
 from visualization import plot_training_summary
-
+import time
+import shutil
 import argparse
 import warnings
+# 记录程序启动时间
+START_TIME = time.time()
+# 设定安全退出时间：11.5 小时 (11.5 * 3600 秒)
+MAX_RUN_SECONDS = 11.5 * 3600
 
 warnings.filterwarnings('ignore')
 
@@ -206,6 +211,36 @@ for i in range(seed_round):
 
     try:
         while len(x_test_left_epoch) > 0:
+            # ==================== 12 小时防暴毙检查 ====================
+            if time.time() - START_TIME > MAX_RUN_SECONDS:
+                
+                print(f"\n[!] 警告：运行已达 11.5 小时，为防止 Kaggle 强制终止，执行紧急存档！")
+                
+                # 1. 保存紧急 Checkpoint
+                ckpt_path = os.path.join('result', f'ckpt_timeout_step_{count}.pth')
+                torch.save({
+                    'count': count,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'x_train_this_epoch': x_train_this_epoch,
+                    'x_test_left_epoch': x_test_left_epoch,
+                    'y_train_this_epoch': y_train_this_epoch,
+                    'y_test_left_labels': y_test_left_labels,
+                    'y_train_detection': y_train_detection,
+                    'first_round_losses': first_round_losses,
+                    'online_losses': online_losses,
+                    'online_metrics': online_metrics
+                }, ckpt_path)
+                print(f"[*] 超时存档已保存至: {ckpt_path}")
+                
+                # 2. 自动把整个 result 文件夹打包成 zip，放在 /kaggle/working 根目录
+                print("[*] 正在自动打包 result 文件夹...")
+                shutil.make_archive('/kaggle/working/AOC_IDS_AutoBackup', 'zip', 'result')
+                print("[*] 打包完成！生成文件：/kaggle/working/AOC_IDS_AutoBackup.zip")
+                
+                # 3. 安全退出循环
+                break
+            
             count += 1
             processed = min(count * sample_interval, total_online_samples)
 
