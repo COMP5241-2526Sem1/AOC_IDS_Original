@@ -16,7 +16,8 @@ import warnings
 # 记录程序启动时间
 START_TIME = time.time()
 # 设定安全退出时间：11.5 小时 (11.5 * 3600 秒)
-MAX_RUN_SECONDS = 11.5 * 3600
+# MAX_RUN_SECONDS = 11.5 * 3600
+MAX_RUN_SECONDS = 1200
 
 warnings.filterwarnings('ignore')
 
