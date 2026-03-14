@@ -196,6 +196,13 @@ for i in range(seed_round):
     else:
         total_online_samples = count * sample_interval + len(x_test_left_epoch)
     total_online_steps = (total_online_samples + sample_interval - 1) // sample_interval
+    
+    # ==================== 补丁：确保基础数据被搬运到 GPU ====================
+    x_train = x_train.to(device)
+    x_test = x_test.to(device)
+    online_x_train = online_x_train.to(device)
+    online_y_train = online_y_train.to(device)
+    # ========================================================================
 
     try:
         while len(x_test_left_epoch) > 0:
