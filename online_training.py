@@ -308,7 +308,8 @@ for i in range(seed_round):
             online_losses.append(step_loss / max(step_batches, 1))
             # ==================== 周期性自动保存 ====================
             if count % args.save_interval == 0:
-                ckpt_path = os.path.join(run_dir, f'ckpt_step_{count}.pth')
+                # 把名字改成固定的 latest_checkpoint.pth，每次保存都会覆盖上一次的，节省空间！
+                ckpt_path = os.path.join(run_dir, 'latest_checkpoint.pth') 
                 torch.save({
                     'count': count,
                     'model_state_dict': model.state_dict(),
@@ -322,7 +323,7 @@ for i in range(seed_round):
                     'online_losses': online_losses,
                     'online_metrics': online_metrics
                 }, ckpt_path)
-                print(f"[*] 已自动存档至: {ckpt_path}")
+                print(f"[*] 已自动存档覆盖至: {ckpt_path} (当前步数: {count})")
 
     except KeyboardInterrupt:
         # ==================== 捕获中断：紧急死亡保存 ====================
